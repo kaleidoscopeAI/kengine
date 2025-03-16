@@ -1,0 +1,14 @@
+# Core Dependencies
+numpy>=1.20.0
+networkx>=2.6.0
+scipy>=1.6.0
+matplotlib>=3.3.0
+plotly>=5.3.0
+fastapi>=0.68.0
+uvicorn>=0.15.0
+pydantic>=1.8.0
+python-multipart>=0.0.5
+
+# Development
+pytest>=6.2.0
+black>=21.5b2

@@ -1,0 +1,31 @@
+# DNS Configuration for artificialthinker.com
+
+dns_records:
+# Main A record - Point to cPanel shared hosting IP
+- type: A
+  host: "@"
+  points_to: "50.62.202.32"
+  ttl: 600
+
+# WWW subdomain
+- type: CNAME
+  host: "www"
+  points_to: "@"
+  ttl: 600
+
+# API subdomain for backend
+- type: CNAME
+  host: "api"
+  points_to: "@"
+  ttl: 600
+
+# Development subdomain
+- type: CNAME
+  host: "dev"
+  points_to: "@"
+  ttl: 600
+
+ssl_configuration:
+  provider: "GoDaddy"
+  type: "AutoSSL" # Use cPanel's AutoSSL
+  validation: "DNS"

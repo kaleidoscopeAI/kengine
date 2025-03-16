@@ -1,0 +1,11 @@
+{
+  "name": "kaleidoscope",
+  "version": "1.0.0",
+  "dependencies": {
+    "react": "^18.2.0",
+    "recharts": "^2.5.0",
+    "lucide-react": "^0.161.0",
+    "@types/react": "^18.0.0",
+    "@types/recharts": "^1.8.24"
+  }
+}

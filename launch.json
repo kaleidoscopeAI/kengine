@@ -1,0 +1,43 @@
+{
+  "configurations": [
+    {
+      "type": "python",
+      "request": "launch",
+      "name": "Launch Program",
+      "program": "${workspaceFolder}/${input:programPath}"
+    }
+  ],
+  "inputs": [
+    {
+      "type": "pickString",
+      "id": "programPath",
+      "description": "Select the Python file to launch",
+      "options": [
+        "app-generator.py",
+        "brain-module-framework.py",
+        "code-reusability-module.py",
+        "code-reusability-module(2).py",
+        "error-handling-system.py",
+        "error-handling-system(1).py",
+        "execution-sandbox-system.py",
+        "kaleidoscope_integration.py",
+        "kaleidoscope-chatbot.py",
+        "kaleidoscope-chatbot(1).py",
+        "kaleidoscope-client.py",
+        "kaleidoscope-core(14).py",
+        "kaleidoscope-extensions.py",
+        "kaleidoscope-integration.py",
+        "kaleidoscope-merged.py",
+        "kaleidoscope-merged(1).py",
+        "kaleidoscope-setup.py",
+        "kaleidoscope-visualization.py",
+        "kaleidoscope-visualization(1).py",
+        "kaleidoscope-web-interface(2).py",
+        "launch.py",
+        "llm-integration-module.py",
+        "setup.py",
+        "system-upgrade-module.py"
+      ]
+    }
+  ]
+}

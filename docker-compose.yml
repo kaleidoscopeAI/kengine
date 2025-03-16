@@ -1,0 +1,62 @@
+services:
+  kaleidoscope:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./workdir:/app/workdir
+    environment:
+      - LOG_LEVEL=INFO
+      - PYTHONPATH=/app
+      - VIRTUAL_HOST=api.artificialthinker.com
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+  redis:
+    image: redis:6-alpine
+    ports:
+      - "127.0.0.1:6380:6379"  # Only allow local connections
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  postgres:
+    image: postgres:13-alpine
+    environment:
+      POSTGRES_USER: kaleidoscope
+      POSTGRES_PASSWORD: kaleidoscope
+      POSTGRES_DB: kaleidoscope
+    ports:
+      - "127.0.0.1:5432:5432"  # Only allow local connections
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kaleidoscope"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  redis_data:
+  postgres_data:

@@ -1,0 +1,28 @@
+# PHP Configuration
+AddHandler application/x-httpd-php .php
+AddType application/x-httpd-php .php
+
+# Memory Limits
+php_value memory_limit 1024M
+php_value upload_max_filesize 64M
+php_value post_max_size 64M
+php_value max_execution_time 300
+
+# Enable reverse proxy
+RewriteEngine On
+
+# API requests
+RewriteCond %{HTTP_HOST} ^api\.artificialthinker\.com$ [NC]
+RewriteRule ^(.*)$ http://localhost:8000/$1 [P,L]
+
+# Main site
+RewriteCond %{HTTP_HOST} ^(www\.)?artificialthinker\.com$ [NC]
+RewriteRule ^(.*)$ http://localhost:3000/$1 [P,L]
+
+# Enable CORS
+Header set Access-Control-Allow-Origin "*"
+Header set Access-Control-Allow-Methods "GET,POST,OPTIONS,DELETE,PUT"
+
+# Add HTTPS redirect
+RewriteCond %{HTTPS} off
+RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]

@@ -1,0 +1,12 @@
+2025-03-11 09:18:16,423 [INFO] kaleidoscope_core.db.init: Initializing database at postgresql://kaleidoscope:kaleidoscope@localhost/kaleidoscope
+2025-03-11 09:18:16,512 [ERROR] kaleidoscope_core.db.init: Database initialization failed: No module named 'psycopg2'
+2025-03-11 09:18:20,512 [INFO] kaleidoscope_core.db.init: Initializing database at postgresql://kaleidoscope:kaleidoscope@localhost/kaleidoscope
+2025-03-11 09:18:20,513 [ERROR] kaleidoscope_core.db.init: Database initialization failed: No module named 'psycopg2'
+2025-03-11 09:18:24,514 [INFO] kaleidoscope_core.db.init: Initializing database at postgresql://kaleidoscope:kaleidoscope@localhost/kaleidoscope
+2025-03-11 09:18:24,515 [ERROR] kaleidoscope_core.db.init: Database initialization failed: No module named 'psycopg2'
+2025-03-11 09:18:28,516 [INFO] kaleidoscope_core.db.init: Initializing database at postgresql://kaleidoscope:kaleidoscope@localhost/kaleidoscope
+2025-03-11 09:18:28,517 [ERROR] kaleidoscope_core.db.init: Database initialization failed: No module named 'psycopg2'
+2025-03-11 09:18:36,517 [INFO] kaleidoscope_core.db.init: Initializing database at postgresql://kaleidoscope:kaleidoscope@localhost/kaleidoscope
+2025-03-11 09:18:36,518 [ERROR] kaleidoscope_core.db.init: Database initialization failed: No module named 'psycopg2'
+2025-03-11 09:18:36,518 [ERROR] KaleidoscopeLauncher: Service initialization failed: RetryError[<Future at 0x72df6f3ef890 state=finished raised ModuleNotFoundError>]
+2025-03-11 09:18:36,519 [INFO] kaleidoscope_core: Shutting down Kaleidoscope AI...
