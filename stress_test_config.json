@@ -1,0 +1,17 @@
+{
+    "concurrent_jobs": 20,
+    "duration_seconds": 120,
+    "fail_fast": true,
+    "logging": {
+        "level": "INFO",
+        "file": "stress_test.log",
+        "detailed_file": "stress_test_detailed.log",
+        "max_file_size": 10000000,
+        "backup_count": 5
+    },
+    "simulation": {
+        "timeout": 30,
+        "retries": 3,
+        "error_threshold": 5
+    }
+}
