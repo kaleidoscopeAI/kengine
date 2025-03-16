@@ -1,1205 +1,3 @@
-#!/usr/bin/env python3
-"""
-Kaleidoscope AI System Extensions
-Advanced modules for software ingestion, drug discovery, and molecular modeling.
-"""
-
-import numpy as np
-import networkx as nx
-import rdkit
-from rdkit import Chem
-from rdkit.Chem import AllChem, Descriptors
-from rdkit.Chem.Draw import MolToImage
-import sqlite3
-import subprocess
-import os
-import json
-import logging
-import hashlib
-import tempfile
-import time
-from typing import Dict, List, Tuple, Any, Optional, Union, Set
-import concurrent.futures
-
-logger = logging.getLogger("KaleidoscopeAI.Extensions")
-
-# Define constants for molecular modeling
-DRUGLIKENESS_FILTERS = {
-    "lipinski": {
-        "MW_max": 500.0,
-        "LogP_max": 5.0,
-        "HBD_max": 5,
-        "HBA_max": 10
-    },
-    "veber": {
-        "RotB_max": 10,
-        "PSA_max": 140
-    },
-    "ghose": {
-        "MW_min": 160.0,
-        "MW_max": 480.0,
-        "LogP_min": -0.4,
-        "LogP_max": 5.6,
-        "AtomsCount_min": 20,
-        "AtomsCount_max": 70
-    }
-}
-
-class SoftwareIngestion:
-    """
-    Handles software ingestion, decompilation, and analysis.
-    Integrates with tools like Radare2, RetDec, and Ghidra.
-    """
-    
-    def __init__(self, 
-                 working_dir: str = './software_analysis',
-                 use_ghidra: bool = False,
-                 use_retdec: bool = True,
-                 use_radare2: bool = True):
-        """Initialize software ingestion module."""
-        self.working_dir = working_dir
-        self.use_ghidra = use_ghidra
-        self.use_retdec = use_retdec
-        self.use_radare2 = use_radare2
-        
-        # Create working directory if it doesn't exist
-        os.makedirs(working_dir, exist_ok=True)
-        
-        # Initialize database for storing analysis results
-        self.db_path = os.path.join(working_dir, 'analysis.db')
-        self._init_database()
-        
-        # Check if required tools are available
-        self.available_tools = self._check_tools()
-        
-        logger.info(f"Software Ingestion module initialized. Available tools: {self.available_tools}")
-    
-    def _init_database(self) -> None:
-        """Initialize SQLite database for storing analysis results."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Create tables if not exist
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS binary_analysis (
-            binary_hash TEXT PRIMARY KEY,
-            filename TEXT,
-            file_size INTEGER,
-            architecture TEXT,
-            analysis_timestamp REAL,
-            tool_used TEXT,
-            analysis_data TEXT
-        )
-        ''')
-        
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS decompilation_results (
-            binary_hash TEXT,
-            output_language TEXT,
-            decompiled_code TEXT,
-            tool_used TEXT,
-            quality_score REAL,
-            timestamp REAL,
-            PRIMARY KEY (binary_hash, output_language)
-        )
-        ''')
-        
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS code_patterns (
-            pattern_id TEXT PRIMARY KEY,
-            pattern_type TEXT,
-            binary_hash TEXT,
-            pattern_data TEXT,
-            detection_timestamp REAL
-        )
-        ''')
-        
-        conn.commit()
-        conn.close()
-    
-    def _check_tools(self) -> Dict[str, bool]:
-        """Check which decompilation and analysis tools are available."""
-        tools = {
-            'radare2': False,
-            'retdec': False,
-            'ghidra': False
-        }
-        
-        # Check for radare2
-        if self.use_radare2:
-            try:
-                result = subprocess.run(['r2', '-v'], 
-                                      stdout=subprocess.PIPE, 
-                                      stderr=subprocess.PIPE,
-                                      timeout=2)
-                tools['radare2'] = result.returncode == 0
-            except (subprocess.SubprocessError, FileNotFoundError):
-                tools['radare2'] = False
-        
-        # Check for RetDec (simplified check)
-        if self.use_retdec:
-            try:
-                # Just check if the directory exists as a basic test
-                retdec_path = os.environ.get('RETDEC_PATH')
-                if retdec_path and os.path.exists(retdec_path):
-                    tools['retdec'] = True
-            except:
-                tools['retdec'] = False
-        
-        # Check for Ghidra (simplified check)
-        if self.use_ghidra:
-            try:
-                ghidra_path = os.environ.get('GHIDRA_PATH')
-                if ghidra_path and os.path.exists(ghidra_path):
-                    tools['ghidra'] = True
-            except:
-                tools['ghidra'] = False
-                
-        return tools
-    
-    def process_binary(self, 
-                       binary_path: str, 
-                       output_language: str = 'c',
-                       do_analysis: bool = True,
-                       do_decompilation: bool = True) -> Dict:
-        """
-        Process a binary file through analysis and decompilation.
-        Returns results of the processing.
-        """
-        if not os.path.exists(binary_path):
-            return {
-                'success': False,
-                'error': f"Binary file not found: {binary_path}"
-            }
-            
-        # Generate a hash for the binary
-        binary_hash = self._hash_file(binary_path)
-        
-        # Check if we've already analyzed this file
-        existing_analysis = self._get_existing_analysis(binary_hash)
-        if existing_analysis and not do_analysis:
-            logger.info(f"Using existing analysis for {binary_path} (hash: {binary_hash})")
-            analysis_result = existing_analysis
-        else:
-            # Perform analysis if requested
-            if do_analysis:
-                analysis_result = self._analyze_binary(binary_path, binary_hash)
-            else:
-                analysis_result = {
-                    'binary_hash': binary_hash,
-                    'filename': os.path.basename(binary_path),
-                    'file_size': os.path.getsize(binary_path)
-                }
-        
-        # Check if we've already decompiled to the requested language
-        existing_decompilation = self._get_existing_decompilation(binary_hash, output_language)
-        if existing_decompilation and not do_decompilation:
-            logger.info(f"Using existing decompilation to {output_language} for {binary_path}")
-            decompilation_result = existing_decompilation
-        else:
-            # Perform decompilation if requested
-            if do_decompilation:
-                decompilation_result = self._decompile_binary(binary_path, binary_hash, output_language)
-            else:
-                decompilation_result = {
-                    'binary_hash': binary_hash,
-                    'output_language': output_language,
-                    'decompiled_code': None,
-                    'success': False,
-                    'message': 'Decompilation not requested'
-                }
-        
-        # Combine results
-        return {
-            'success': analysis_result.get('success', False) or decompilation_result.get('success', False),
-            'analysis': analysis_result,
-            'decompilation': decompilation_result,
-            'binary_hash': binary_hash
-        }
-    
-    def _hash_file(self, file_path: str) -> str:
-        """Generate SHA-256 hash of a file."""
-        hash_sha256 = hashlib.sha256()
-        with open(file_path, 'rb') as f:
-            for chunk in iter(lambda: f.read(4096), b''):
-                hash_sha256.update(chunk)
-        return hash_sha256.hexdigest()
-    
-    def _get_existing_analysis(self, binary_hash: str) -> Dict:
-        """Retrieve existing analysis for a binary from the database."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute(
-            "SELECT * FROM binary_analysis WHERE binary_hash = ?", 
-            (binary_hash,)
-        )
-        
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            column_names = [description[0] for description in cursor.description]
-            return dict(zip(column_names, row))
-        
-        return None
-    
-    def _get_existing_decompilation(self, binary_hash: str, output_language: str) -> Dict:
-        """Retrieve existing decompilation for a binary from the database."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute(
-            "SELECT * FROM decompilation_results WHERE binary_hash = ? AND output_language = ?", 
-            (binary_hash, output_language)
-        )
-        
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            column_names = [description[0] for description in cursor.description]
-            result = dict(zip(column_names, row))
-            result['success'] = True
-            return result
-        
-        return None
-    
-    def _analyze_binary(self, binary_path: str, binary_hash: str) -> Dict:
-        """Analyze a binary file using available tools."""
-        filename = os.path.basename(binary_path)
-        file_size = os.path.getsize(binary_path)
-        
-        analysis_data = {}
-        tool_used = None
-        architecture = "unknown"
-        
-        # Use radare2 if available
-        if self.available_tools.get('radare2', False):
-            try:
-                # Basic info extraction with radare2
-                r2_cmd = f"r2 -c 'iI' -q {binary_path}"
-                result = subprocess.run(r2_cmd, 
-                                     shell=True,
-                                     stdout=subprocess.PIPE, 
-                                     stderr=subprocess.PIPE,
-                                     text=True,
-                                     timeout=30)
-                
-                if result.returncode == 0:
-                    # Parse output to extract architecture and other info
-                    output = result.stdout
-                    analysis_data['r2_info'] = output
-                    
-                    # Extract architecture if possible
-                    for line in output.split('\n'):
-                        if line.startswith('arch'):
-                            architecture = line.split(' ')[1].strip()
-                            break
-                    
-                    tool_used = "radare2"
-                    
-                    # Get function list
-                    r2_funcs_cmd = f"r2 -c 'aaa;afl' -q {binary_path}"
-                    funcs_result = subprocess.run(r2_funcs_cmd, 
-                                               shell=True,
-                                               stdout=subprocess.PIPE, 
-                                               stderr=subprocess.PIPE,
-                                               text=True,
-                                               timeout=60)
-                    
-                    if funcs_result.returncode == 0:
-                        analysis_data['functions'] = funcs_result.stdout
-            
-            except subprocess.SubprocessError as e:
-                logger.error(f"Error analyzing with radare2: {str(e)}")
-                analysis_data['r2_error'] = str(e)
-        
-        # Store analysis results
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        INSERT OR REPLACE INTO binary_analysis 
-        (binary_hash, filename, file_size, architecture, analysis_timestamp, tool_used, analysis_data)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            binary_hash,
-            filename,
-            file_size,
-            architecture,
-            time.time(),
-            tool_used,
-            json.dumps(analysis_data)
-        ))
-        
-        conn.commit()
-        conn.close()
-        
-        return {
-            'success': tool_used is not None,
-            'binary_hash': binary_hash,
-            'filename': filename,
-            'file_size': file_size,
-            'architecture': architecture,
-            'tool_used': tool_used,
-            'analysis_data': analysis_data
-        }
-    
-    def _decompile_binary(self, binary_path: str, binary_hash: str, output_language: str) -> Dict:
-        """Decompile a binary file to the specified output language."""
-        supported_languages = ['c', 'python', 'pseudocode']
-        
-        if output_language not in supported_languages:
-            return {
-                'success': False,
-                'error': f"Unsupported output language: {output_language}. Supported: {supported_languages}"
-            }
-        
-        decompiled_code = None
-        tool_used = None
-        quality_score = 0.0
-        
-        # Use RetDec if available and requested language is C
-        if self.available_tools.get('retdec', False) and output_language == 'c':
-            try:
-                # Create a temporary output file
-                output_dir = tempfile.mkdtemp(dir=self.working_dir)
-                output_file = os.path.join(output_dir, 'decompiled.c')
-                
-                # Run RetDec decompiler
-                retdec_path = os.environ.get('RETDEC_PATH', 'retdec-decompiler')
-                cmd = f"{retdec_path} {binary_path} -o {output_file}"
-                
-                result = subprocess.run(cmd, 
-                                     shell=True,
-                                     stdout=subprocess.PIPE, 
-                                     stderr=subprocess.PIPE,
-                                     text=True,
-                                     timeout=300)  # Allow up to 5 minutes
-                
-                if result.returncode == 0 and os.path.exists(output_file):
-                    with open(output_file, 'r') as f:
-                        decompiled_code = f.read()
-                    
-                    # Estimate quality based on code size and structure
-                    quality_score = min(1.0, len(decompiled_code) / 10000)
-                    tool_used = "retdec"
-            
-            except Exception as e:
-                logger.error(f"Error decompiling with RetDec: {str(e)}")
-                return {
-                    'success': False,
-                    'error': f"RetDec decompilation error: {str(e)}"
-                }
-        
-        # For languages other than C, we need to first decompile to C, then transpile
-        elif output_language in ['python', 'pseudocode']:
-            # First decompile to C
-            c_result = self._decompile_binary(binary_path, binary_hash, 'c')
-            
-            if c_result.get('success'):
-                # Then transpile from C to the target language
-                c_code = c_result.get('decompiled_code')
-                transpiled_code = self._transpile_code(c_code, 'c', output_language)
-                
-                if transpiled_code:
-                    decompiled_code = transpiled_code
-                    quality_score = c_result.get('quality_score', 0.0) * 0.8  # Slight penalty for transpilation
-                    tool_used = f"{c_result.get('tool_used')}_transpiled"
-        
-        # Store decompilation results
-        if decompiled_code:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-            INSERT OR REPLACE INTO decompilation_results 
-            (binary_hash, output_language, decompiled_code, tool_used, quality_score, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ''', (
-                binary_hash,
-                output_language,
-                decompiled_code,
-                tool_used,
-                quality_score,
-                time.time()
-            ))
-            
-            conn.commit()
-            conn.close()
-        
-        return {
-            'success': decompiled_code is not None,
-            'binary_hash': binary_hash,
-            'output_language': output_language,
-            'decompiled_code': decompiled_code,
-            'tool_used': tool_used,
-            'quality_score': quality_score
-        }
-    
-    def _transpile_code(self, source_code: str, from_language: str, to_language: str) -> Optional[str]:
-        """Transpile code from one language to another using AI-based techniques."""
-        if not source_code:
-            return None
-            
-        # For demo purposes, we'll implement a very basic C to Python transpiler
-        if from_language == 'c' and to_language == 'python':
-            # This is a highly simplified implementation - in practice, you'd use a proper parser
-            python_code = []
-            
-            # Basic headers and setup
-            python_code.append("# Auto-generated Python code from C")
-            python_code.append("import ctypes")
-            python_code.append("import sys")
-            python_code.append("")
-            
-            lines = source_code.split('\n')
-            indent_level = 0
-            
-            for line in lines:
-                stripped = line.strip()
-                
-                # Skip C preprocessor directives
-                if stripped.startswith('#'):
-                    continue
-                    
-                # Convert function declarations
-                if 'int main(' in stripped:
-                    python_code.append("def main():")
-                    indent_level = 1
-                    continue
-                    
-                # Convert function returns
-                if stripped.startswith('return '):
-                    python_code.append("    " * indent_level + stripped.replace(';', ''))
-                    continue
-                    
-                # Convert printf
-                if 'printf(' in stripped:
-                    # Extract the string and arguments
-                    print_content = stripped[stripped.find('printf(')+7:stripped.rfind(')')]
-                    if print_content.startswith('"'):
-                        # Extract format string and args
-                        format_end = print_content.rfind('"')
-                        format_str = print_content[1:format_end]
-                        
-                        # Handle format specifiers
-                        format_str = format_str.replace('%d', '{}').replace('%s', '{}').replace('%f', '{}')
-                        
-                        if format_end + 1 < len(print_content) and ',' in print_content[format_end:]:
-                            args = print_content[format_end+2:]
-                            python_code.append("    " * indent_level + f"print('{format_str}'.format({args}))")
-                        else:
-                            python_code.append("    " * indent_level + f"print('{format_str}')")
-                    continue
-                    
-                # Convert basic variable declarations
-                if any(t in stripped for t in ['int ', 'float ', 'double ', 'char ']):
-                    parts = stripped.split()
-                    if len(parts) >= 2 and ';' in parts[-1]:
-                        var_name = parts[1].rstrip(';')
-                        # Remove the type and just assign a value if present
-                        if '=' in stripped:
-                            assign_part = stripped[stripped.find('=')+1:].strip().rstrip(';')
-                            python_code.append("    " * indent_level + f"{var_name} = {assign_part}")
-                        else:
-                            # Default initialization based on type
-                            if 'int' in parts[0]:
-                                python_code.append("    " * indent_level + f"{var_name} = 0")
-                            elif 'float' in parts[0] or 'double' in parts[0]:
-                                python_code.append("    " * indent_level + f"{var_name} = 0.0")
-                            elif 'char' in parts[0]:
-                                python_code.append("    " * indent_level + f"{var_name} = ''")
-                        continue
-                
-                # Convert if statements
-                if stripped.startswith('if '):
-                    condition = stripped[stripped.find('(')+1:stripped.rfind(')')].strip()
-                    python_code.append("    " * indent_level + f"if {condition}:")
-                    indent_level += 1
-                    continue
-                    
-                # Convert else statements
-                if stripped == 'else {':
-                    indent_level -= 1
-                    python_code.append("    " * indent_level + "else:")
-                    indent_level += 1
-                    continue
-                    
-                # Handle closing braces
-                if stripped == '}':
-                    indent_level = max(0, indent_level - 1)
-                    continue
-                    
-                # Add any other line with appropriate indentation, removing semicolons
-                if stripped and not stripped.startswith('//'):
-                    python_code.append("    " * indent_level + stripped.rstrip(';'))
-            
-            # Add main call at the end
-            python_code.append("\nif __name__ == '__main__':")
-            python_code.append("    main()")
-            
-            return '\n'.join(python_code)
-            
-        elif to_language == 'pseudocode':
-            # Convert to a generic pseudocode
-            pseudocode = []
-            
-            # Header
-            pseudocode.append("// Pseudocode representation")
-            pseudocode.append("")
-            
-            lines = source_code.split('\n')
-            indent_level = 0
-            
-            for line in lines:
-                stripped = line.strip()
-                
-                # Skip includes and defines
-                if stripped.startswith('#'):
-                    continue
-                    
-                # Simplify function declarations
-                if 'int main(' in stripped or 'void main(' in stripped:
-                    pseudocode.append("FUNCTION Main()")
-                    indent_level = 1
-                    continue
-                elif 'int ' in stripped and '(' in stripped and '{' in stripped:
-                    func_name = stripped[stripped.find(' ')+1:stripped.find('(')]
-                    params = stripped[stripped.find('(')+1:stripped.find(')')]
-                    pseudocode.append(f"FUNCTION {func_name}({params})")
-                    indent_level = 1
-                    continue
-                    
-                # Convert returns
-                if stripped.startswith('return '):
-                    pseudocode.append("    " * indent_level + "RETURN " + stripped[7:].rstrip(';'))
-                    continue
-                    
-                # Convert printf to OUTPUT
-                if 'printf(' in stripped:
-                    content = stripped[stripped.find('printf(')+7:stripped.rfind(')')].strip()
-                    pseudocode.append("    " * indent_level + f"OUTPUT {content}")
-                    continue
-                    
-                # Convert if statements
-                if stripped.startswith('if '):
-                    condition = stripped[stripped.find('(')+1:stripped.rfind(')')].strip()
-                    pseudocode.append("    " * indent_level + f"IF {condition} THEN")
-                    indent_level += 1
-                    continue
-                    
-                # Convert else
-                if stripped == 'else {':
-                    indent_level -= 1
-                    pseudocode.append("    " * indent_level + "ELSE")
-                    indent_level += 1
-                    continue
-                    
-                # Convert loops
-                if stripped.startswith('for '):
-                    loop_parts = stripped[stripped.find('(')+1:stripped.rfind(')')].split(';')
-                    if len(loop_parts) == 3:
-                        init, cond, incr = loop_parts
-                        pseudocode.append("    " * indent_level + f"FOR {init.strip()} TO {cond.strip()} STEP {incr.strip()}")
-                        indent_level += 1
-                    continue
-                    
-                if stripped.startswith('while '):
-                    condition = stripped[stripped.find('(')+1:stripped.rfind(')')].strip()
-                    pseudocode.append("    " * indent_level + f"WHILE {condition} DO")
-                    indent_level += 1
-                    continue
-                    
-                # Handle closing braces
-                if stripped == '}':
-                    indent_level = max(0, indent_level - 1)
-                    if indent_level == 0:
-                        pseudocode.append("END FUNCTION")
-                    else:
-                        pseudocode.append("    " * indent_level + "END")
-                    continue
-                    
-                # Add any other line with appropriate indentation, removing semicolons
-                if stripped and not stripped.startswith('//'):
-                    pseudocode.append("    " * indent_level + stripped.rstrip(';'))
-            
-            return '\n'.join(pseudocode)
-            
-        return None
-    
-    def detect_patterns(self, binary_hash: str) -> Dict:
-        """
-        Detect common patterns and algorithms in the decompiled code.
-        Returns detected patterns and their confidence scores.
-        """
-        # Get decompiled C code
-        decompiled = self._get_existing_decompilation(binary_hash, 'c')
-        if not decompiled or not decompiled.get('decompiled_code'):
-            return {
-                'success': False,
-                'error': 'No decompiled code available for pattern detection'
-            }
-        
-        code = decompiled.get('decompiled_code')
-        patterns = []
-        
-        # Simple pattern detection based on keywords and structure
-        pattern_signatures = {
-            'encryption': [
-                'AES', 'DES', 'RC4', 'encrypt', 'decrypt', 'cipher',
-                'XOR', 'shift_left', 'shift_right', 'rotl', 'rotr'
-            ],
-            'network': [
-                'socket', 'connect', 'bind', 'listen', 'accept', 'recv',
-                'send', 'htons', 'inet_addr', 'getaddrinfo'
-            ],
-            'file_operations': [
-                'fopen', 'fread', 'fwrite', 'fclose', 'open', 'read',
-                'write', 'close', 'FILE'
-            ],
-            'string_manipulation': [
-                'strcpy', 'strncpy', 'strcat', 'strncat', 'strcmp',
-                'strncmp', 'strlen', 'memcpy', 'memset'
-            ],
-            'sorting_algorithms': [
-                'bubble sort', 'quick sort', 'merge sort', 'heap sort',
-                'insertion sort', 'selection sort'
-            ],
-            'data_structures': [
-                'linked list', 'stack', 'queue', 'tree', 'graph',
-                'hash table', 'hash map'
-            ]
-        }
-        
-        # Check for patterns
-        for pattern_type, signatures in pattern_signatures.items():
-            matches = 0
-            for sig in signatures:
-                if sig.lower() in code.lower():
-                    matches += 1
-            
-            if matches > 0:
-                confidence = min(0.95, matches / len(signatures) * 2)
-                
-                pattern_id = f"pattern_{pattern_type}_{binary_hash}_{int(time.time())}"
-                pattern = {
-                    'pattern_id': pattern_id,
-                    'type': pattern_type,
-                    'matches': matches,
-                    'confidence': confidence,
-                    'description': f"Detected {pattern_type} pattern with {matches} signature matches"
-                }
-                patterns.append(pattern)
-                
-                # Store pattern in database
-                self._store_pattern(pattern_id, pattern_type, binary_hash, pattern)
-        
-        return {
-            'success': True,
-            'patterns': patterns,
-            'pattern_count': len(patterns),
-            'binary_hash': binary_hash
-        }
-    
-    def _store_pattern(self, pattern_id: str, pattern_type: str, binary_hash: str, pattern_data: Dict) -> None:
-        """Store detected pattern in the database."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        INSERT OR REPLACE INTO code_patterns
-        (pattern_id, pattern_type, binary_hash, pattern_data, detection_timestamp)
-        VALUES (?, ?, ?, ?, ?)
-        ''', (
-            pattern_id,
-            pattern_type,
-            binary_hash,
-            json.dumps(pattern_data),
-            time.time()
-        ))
-        
-        conn.commit()
-        conn.close()
-    
-    def get_patterns_for_binary(self, binary_hash: str) -> List[Dict]:
-        """Retrieve all patterns detected for a specific binary."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute(
-            "SELECT pattern_data FROM code_patterns WHERE binary_hash = ?",
-            (binary_hash,)
-        )
-        
-        rows = cursor.fetchall()
-        conn.close()
-        
-        patterns = []
-        for row in rows:
-            pattern_data = json.loads(row[0])
-            patterns.append(pattern_data)
-            
-        return patterns
-    
-    def reconstruct_software(self, 
-                           binary_hash: str, 
-                           target_language: str = 'python',
-                           enhance: bool = True) -> Dict:
-        """
-        Reconstruct and potentially enhance software from binary analysis.
-        Returns the reconstructed code and enhancement details.
-        """
-        # First get decompiled code
-        decompiled = self._get_existing_decompilation(binary_hash, target_language)
-        if not decompiled or not decompiled.get('decompiled_code'):
-            # Try to decompile now
-            decompiled_c = self._get_existing_decompilation(binary_hash, 'c')
-            if decompiled_c and decompiled_c.get('decompiled_code'):
-                # Transpile from C to target language
-                transpiled = self._transpile_code(
-                    decompiled_c.get('decompiled_code'),
-                    'c',
-                    target_language
-                )
-                if transpiled:
-                    decompiled = {
-                        'decompiled_code': transpiled,
-                        'success': True
-                    }
-            
-            if not decompiled or not decompiled.get('decompiled_code'):
-                return {
-                    'success': False,
-                    'error': f'Unable to obtain code in {target_language} for reconstruction'
-                }
-        
-        code = decompiled.get('decompiled_code')
-        
-        # Get patterns to understand what the code does
-        patterns = self.get_patterns_for_binary(binary_hash)
-        
-        enhancements = []
-        enhanced_code = code
-        
-        if enhance:
-            # Apply enhancements based on detected patterns
-            for pattern in patterns:
-                pattern_type = pattern.get('type')
-                
-                # Enhancement for file operations: add error handling
-                if pattern_type == 'file_operations' and target_language == 'python':
-                    if 'open(' in code and 'try:' not in code:
-                        # Add basic try-except for file operations
-                        enhanced_code = self._enhance_file_operations(enhanced_code)
-                        enhancements.append({
-                            'type': 'error_handling',
-                            'description': 'Added try-except blocks for file operations'
-                        })
-                
-                # Enhancement for string manipulation: add bounds checking
-                elif pattern_type == 'string_manipulation' and target_language == 'python':
-                    if any(func in code for func in ['strcpy', 'strcat', 'memcpy']):
-                        enhanced_code = self._enhance_string_safety(enhanced_code)
-                        enhancements.append({
-                            'type': 'security',
-                            'description': 'Improved string handling safety'
-                        })
-                
-                # Enhancement for sorting: optimize algorithms
-                elif pattern_type == 'sorting_algorithms' and target_language == 'python':
-                    if 'bubble sort' in code.lower() or 'selection sort' in code.lower():
-                        enhanced_code = self._optimize_sorting(enhanced_code)
-                        enhancements.append({
-                            'type': 'performance',
-                            'description': 'Optimized sorting algorithms'
-                        })
-                        
-                # Add more enhancements for other patterns
-        
-        return {
-            'success': True,
-            'original_code': code,
-            'enhanced_code': enhanced_code,
-            'enhancements': enhancements,
-            'binary_hash': binary_hash,
-            'target_language': target_language
-        }
-    
-    def _enhance_file_operations(self, code: str) -> str:
-        """Add error handling to file operations."""
-        lines = code.split('\n')
-        enhanced = []
-        i = 0
-        
-        while i < len(lines):
-            line = lines[i]
-            
-            # Check for file opening without try-except
-            if ('open(' in line or 'fopen(' in line) and 'try:' not in line:
-                # Add try block
-                indentation = len(line) - len(line.lstrip())
-                indent = ' ' * indentation
-                
-                enhanced.append(f"{indent}try:")
-                enhanced.append(f"{indent}    {line.lstrip()}")
-                
-                # Find the scope of the file operation
-                j = i + 1
-                while j < len(lines) and (len(lines[j]) - len(lines[j].lstrip())) > indentation:
-                    enhanced.append(f"{indent}    {lines[j].lstrip()}")
-                    j += 1
-                
-                # Add except block
-                enhanced.append(f"{indent}except Exception as e:")
-                enhanced.append(f"{indent}    print(f\"Error during file operation: {{e}}\")")
-                enhanced.append(f"{indent}    # Handle error appropriately")
-                
-                i = j
-            else:
-                enhanced.append(line)
-                i += 1
-        
-        return '\n'.join(enhanced)
-    
-    def _enhance_string_safety(self, code: str) -> str:
-        """Enhance string manipulation safety."""
-        if 'python' in code.lower():
-            # For Python, replace unsafe string functions
-            replacements = {
-                'strcpy': 'safe_copy',
-                'strcat': 'safe_concatenate',
-                'memcpy': 'safe_memory_copy'
-            }
-            
-            for old, new in replacements.items():
-                code = code.replace(old, new)
-            
-            # Add safety function definitions if not already present
-            if 'def safe_copy' not in code:
-                safety_functions = """
-# Enhanced safety functions
-def safe_copy(dest, src):
-    \"\"\"Safe string copy with bounds checking\"\"\"
-    if isinstance(src, str) and isinstance(dest, list):
-        for i in range(min(len(src), len(dest)-1)):
-            dest[i] = src[i]
-        dest[min(len(src), len(dest)-1)] = '\\0'
-    return dest
-
-def safe_concatenate(dest, src):
-    \"\"\"Safe string concatenation with bounds checking\"\"\"
-    if isinstance(src, str) and isinstance(dest, list):
-        dest_len = dest.index('\\0') if '\\0' in dest else 0
-        for i in range(min(len(src), len(dest)-dest_len-1)):
-            dest[dest_len+i] = src[i]
-        dest[min(dest_len+len(src), len(dest)-1)] = '\\0'
-    return dest
-
-def safe_memory_copy(dest, src, size):
-    \"\"\"Safe memory copy with bounds checking\"\"\"
-    if hasattr(src, '__len__') and hasattr(dest, '__len__'):
-        for i in range(min(size, len(dest), len(src))):
-            dest[i] = src[i]
-    return dest
-"""
-                # Find a good place to insert the safety functions
-                import_end = code.rfind('import ')
-                if import_end >= 0:
-                    # Find the end of the imports section
-                    import_end = code.find('\n', import_end)
-                    if import_end >= 0:
-                        code = code[:import_end+1] + safety_functions + code[import_end+1:]
-                else:
-                    # Just add at the beginning
-                    code = safety_functions + code
-        
-        return code
-    
-    def _optimize_sorting(self, code: str) -> str:
-        """Optimize sorting algorithms."""
-        if 'python' in code.lower():
-            # Replace inefficient sorts with Python's built-in sort
-            if 'def bubble_sort' in code or 'def selection_sort' in code:
-                # Find the sorting function
-                for sort_name in ['bubble_sort', 'selection_sort']:
-                    start_idx = code.find(f'def {sort_name}')
-                    if start_idx >= 0:
-                        # Find the end of the function
-                        depth = 0
-                        end_idx = start_idx
-                        in_function = False
-                        
-                        for i in range(start_idx, len(code)):
-                            if code[i] == ':':
-                                in_function = True
-                            elif in_function and code[i:i+4] == '    ' and code[i+4] != ' ':
-                                depth = 1
-                            elif in_function and depth == 1 and (i == len(code)-1 or code[i:i+4] != '    '):
-                                end_idx = i
-                                break
-                        
-                        if end_idx > start_idx:
-                            # Replace with optimized version
-                            optimized_func = f"""def {sort_name}(arr):
-    \"\"\"Optimized sorting function\"\"\"
-    # Original function replaced with more efficient implementation
-    return sorted(arr)
-"""
-                            code = code[:start_idx] + optimized_func + code[end_idx:]
-        
-        return code
-
-
-class DrugDiscovery:
-    """
-    Handles molecular modeling, drug discovery, and biomimicry.
-    Integrates with tools like RDKit, OpenBabel, and external databases.
-    """
-    
-    def __init__(self, 
-                 working_dir: str = './drug_discovery',
-                 use_remote_databases: bool = True):
-        """Initialize drug discovery module."""
-        self.working_dir = working_dir
-        self.use_remote_databases = use_remote_databases
-        
-        # Create working directory if it doesn't exist
-        os.makedirs(working_dir, exist_ok=True)
-        
-        # Initialize database for storing molecular data
-        self.db_path = os.path.join(working_dir, 'molecules.db')
-        self._init_database()
-        
-        # Cache for molecular properties
-        self.property_cache = {}
-        
-        logger.info(f"Drug Discovery module initialized")
-    
-    def _init_database(self) -> None:
-        """Initialize SQLite database for storing molecular data."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Create tables if not exist
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS molecules (
-            molecule_id TEXT PRIMARY KEY,
-            smiles TEXT,
-            inchi TEXT,
-            mol_formula TEXT,
-            mol_weight REAL,
-            created_timestamp REAL,
-            source TEXT,
-            properties TEXT
-        )
-        ''')
-        
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS interactions (
-            interaction_id TEXT PRIMARY KEY,
-            molecule1_id TEXT,
-            molecule2_id TEXT,
-            interaction_type TEXT,
-            affinity REAL,
-            detected_timestamp REAL,
-            properties TEXT
-        )
-        ''')
-        
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS docking_results (
-            docking_id TEXT PRIMARY KEY,
-            molecule_id TEXT,
-            target_id TEXT,
-            score REAL,
-            binding_mode TEXT,
-            docking_timestamp REAL,
-            details TEXT
-        )
-        ''')
-        
-        conn.commit()
-        conn.close()
-    
-    def process_molecule(self, 
-                       molecule_input: str, 
-                       input_format: str = 'smiles') -> Dict:
-        """
-        Process a molecule from various input formats (SMILES, InChI, etc.).
-        Returns molecular properties and analysis.
-        """
-        try:
-            # Create RDKit molecule object
-            mol = None
-            
-            if input_format.lower() == 'smiles':
-                mol = Chem.MolFromSmiles(molecule_input)
-            elif input_format.lower() == 'inchi':
-                mol = Chem.MolFromInchi(molecule_input)
-            else:
-                return {
-                    'success': False,
-                    'error': f"Unsupported input format: {input_format}"
-                }
-            
-            if mol is None:
-                return {
-                    'success': False,
-                    'error': f"Failed to parse molecule from {input_format}"
-                }
-            
-            # Calculate basic properties
-            smiles = Chem.MolToSmiles(mol)
-            inchi = Chem.MolToInchi(mol)
-            mol_formula = Chem.rdMolDescriptors.CalcMolFormula(mol)
-            mol_weight = Descriptors.MolWt(mol)
-            
-            # Generate unique ID for the molecule
-            molecule_id = hashlib.md5(smiles.encode()).hexdigest()
-            
-            # Calculate more properties
-            properties = self._calculate_properties(mol)
-            
-            # Store in database
-            self._store_molecule(molecule_id, smiles, inchi, mol_formula, mol_weight, properties)
-            
-            return {
-                'success': True,
-                'molecule_id': molecule_id,
-                'smiles': smiles,
-                'inchi': inchi,
-                'formula': mol_formula,
-                'molecular_weight': mol_weight,
-                'properties': properties,
-                'druglikeness': self._assess_druglikeness(properties)
-            }
-            
-        except Exception as e:
-            logger.error(f"Error processing molecule: {str(e)}")
-            return {
-                'success': False,
-                'error': f"Error processing molecule: {str(e)}"
-            }
-    
-    def _calculate_properties(self, mol) -> Dict:
-        """Calculate molecular properties using RDKit."""
-        properties = {}
-        
-        # Physical properties
-        properties['logP'] = Descriptors.MolLogP(mol)
-        properties['TPSA'] = Descriptors.TPSA(mol)
-        properties['HBD'] = Descriptors.NumHDonors(mol)
-        properties['HBA'] = Descriptors.NumHAcceptors(mol)
-        properties['RotB'] = Descriptors.NumRotatableBonds(mol)
-        properties['MolWt'] = Descriptors.MolWt(mol)
-        properties['HeavyAtoms'] = mol.GetNumHeavyAtoms()
-        properties['Rings'] = Chem.rdMolDescriptors.CalcNumRings(mol)
-        properties['AromaticRings'] = Chem.rdMolDescriptors.CalcNumAromaticRings(mol)
-        
-        # Topological properties
-        properties['BertzCT'] = Chem.rdMolDescriptors.CalcBertzCT(mol)
-        properties['FractionCSP3'] = Chem.rdMolDescriptors.CalcFractionCSP3(mol)
-        
-        # Store in cache
-        smiles = Chem.MolToSmiles(mol)
-        self.property_cache[smiles] = properties
-        
-        return properties
-    
-    def _assess_druglikeness(self, properties: Dict) -> Dict:
-        """Assess druglikeness based on various rule sets."""
-        results = {}
-        
-        # Lipinski's Rule of 5
-        lipinski_violations = 0
-        if properties['MolWt'] > DRUGLIKENESS_FILTERS['lipinski']['MW_max']:
-            lipinski_violations += 1
-        if properties['logP'] > DRUGLIKENESS_FILTERS['lipinski']['LogP_max']:
-            lipinski_violations += 1
-        if properties['HBD'] > DRUGLIKENESS_FILTERS['lipinski']['HBD_max']:
-            lipinski_violations += 1
-        if properties['HBA'] > DRUGLIKENESS_FILTERS['lipinski']['HBA_max']:
-            lipinski_violations += 1
-            
-        results['lipinski'] = {
-            'violations': lipinski_violations,
-            'pass': lipinski_violations <= 1  # Allow one violation
-        }
-        
-        # Veber rules
-        veber_pass = (
-            properties['RotB'] <= DRUGLIKENESS_FILTERS['veber']['RotB_max'] and
-            properties['TPSA'] <= DRUGLIKENESS_FILTERS['veber']['PSA_max']
-        )
-        results['veber'] = {
-            'pass': veber_pass
-        }
-        
-        # Ghose filter
-        ghose_violations = 0
-        if properties['MolWt'] < DRUGLIKENESS_FILTERS['ghose']['MW_min'] or properties['MolWt'] > DRUGLIKENESS_FILTERS['ghose']['MW_max']:
-            ghose_violations += 1
-        if properties['logP'] < DRUGLIKENESS_FILTERS['ghose']['LogP_min'] or properties['logP'] > DRUGLIKENESS_FILTERS['ghose']['LogP_max']:
-            ghose_violations += 1
-        if properties['HeavyAtoms'] < DRUGLIKENESS_FILTERS['ghose']['AtomsCount_min'] or properties['HeavyAtoms'] > DRUGLIKENESS_FILTERS['ghose']['AtomsCount_max']:
-            ghose_violations += 1
-            
-        results['ghose'] = {
-            'violations': ghose_violations,
-            'pass': ghose_violations <= 1
-        }
-        
-        # Overall druglikeness score (simple average of pass rates)
-        overall_score = (
-            (1 if results['lipinski']['pass'] else 0) +
-            (1 if results['veber']['pass'] else 0) +
-            (1 if results['ghose']['pass'] else 0)
-        ) / 3.0
-        
-        results['overall_score'] = overall_score
-        results['overall_pass'] = overall_score >= 0.5
-        
-        return results
-    
-    def _store_molecule(self, 
-                       molecule_id: str, 
-                       smiles: str, 
-                       inchi: str, 
-                       mol_formula: str, 
-                       mol_weight: float, 
-                       properties: Dict) -> None:
-        """Store molecule information in the database."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        INSERT OR REPLACE INTO molecules
-        (molecule_id, smiles, inchi, mol_formula, mol_weight, created_timestamp, source, properties)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            molecule_id,
-            smiles,
-            inchi,
-            mol_formula,
-            mol_weight,
-            time.time(),
-            'user_input',
-            json.dumps(properties)
-        ))
-        
-        conn.commit()
-        conn.close()
-    
-    def generate_molecular_variants(self, 
-                                  molecule_id: str, 
-                                  num_variants: int = 5,
-                                  mutation_type: str = 'functional_groups') -> Dict:
-        """
-        Generate structural variants of a molecule through various mutations.
-        Returns list of variant molecules and their properties.
-        """
         # Get original molecule
         molecule = self._get_molecule(molecule_id)
         if not molecule:
@@ -2677,24 +1475,1207 @@ class KaleidoscopeExtensions:
     def find_cross_domain_insights(self, domains: List[str]) -> Dict:
         """Find patterns across multiple domains."""
         return self.pattern_recognition.find_cross_domain_patterns(domains)
+#!/usr/bin/env python3
+"""
+Kaleidoscope AI System Extensions
+Advanced modules for software ingestion, drug discovery, and molecular modeling.
+"""
 
-from kaleidoscope_core import KaleidoscopeCore
-import importlib
-from typing import Dict
+import numpy as np
+import networkx as nx
+import rdkit
+from rdkit import Chem
+from rdkit.Chem import AllChem, Descriptors
+from rdkit.Chem.Draw import MolToImage
+import sqlite3
+import subprocess
+import os
+import json
+import logging
+import hashlib
+import tempfile
+import time
+from typing import Dict, List, Tuple, Any, Optional, Union, Set
+import concurrent.futures
 
-class ExtensionManager:
-    def __init__(self, core: KaleidoscopeCore):
-        self.core = core
-        self.extensions = {}
-        self.extension_states = {}
+logger = logging.getLogger("KaleidoscopeAI.Extensions")
+
+# Define constants for molecular modeling
+DRUGLIKENESS_FILTERS = {
+    "lipinski": {
+        "MW_max": 500.0,
+        "LogP_max": 5.0,
+        "HBD_max": 5,
+        "HBA_max": 10
+    },
+    "veber": {
+        "RotB_max": 10,
+        "PSA_max": 140
+    },
+    "ghose": {
+        "MW_min": 160.0,
+        "MW_max": 480.0,
+        "LogP_min": -0.4,
+        "LogP_max": 5.6,
+        "AtomsCount_min": 20,
+        "AtomsCount_max": 70
+    }
+}
+
+class SoftwareIngestion:
+    """
+    Handles software ingestion, decompilation, and analysis.
+    Integrates with tools like Radare2, RetDec, and Ghidra.
+    """
+    
+    def __init__(self, 
+                 working_dir: str = './software_analysis',
+                 use_ghidra: bool = False,
+                 use_retdec: bool = True,
+                 use_radare2: bool = True):
+        """Initialize software ingestion module."""
+        self.working_dir = working_dir
+        self.use_ghidra = use_ghidra
+        self.use_retdec = use_retdec
+        self.use_radare2 = use_radare2
         
-    def load_extension(self, name: str, path: str):
+        # Create working directory if it doesn't exist
+        os.makedirs(working_dir, exist_ok=True)
+        
+        # Initialize database for storing analysis results
+        self.db_path = os.path.join(working_dir, 'analysis.db')
+        self._init_database()
+        
+        # Check if required tools are available
+        self.available_tools = self._check_tools()
+        
+        logger.info(f"Software Ingestion module initialized. Available tools: {self.available_tools}")
+    
+    def _init_database(self) -> None:
+        """Initialize SQLite database for storing analysis results."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Create tables if not exist
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS binary_analysis (
+            binary_hash TEXT PRIMARY KEY,
+            filename TEXT,
+            file_size INTEGER,
+            architecture TEXT,
+            analysis_timestamp REAL,
+            tool_used TEXT,
+            analysis_data TEXT
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS decompilation_results (
+            binary_hash TEXT,
+            output_language TEXT,
+            decompiled_code TEXT,
+            tool_used TEXT,
+            quality_score REAL,
+            timestamp REAL,
+            PRIMARY KEY (binary_hash, output_language)
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS code_patterns (
+            pattern_id TEXT PRIMARY KEY,
+            pattern_type TEXT,
+            binary_hash TEXT,
+            pattern_data TEXT,
+            detection_timestamp REAL
+        )
+        ''')
+        
+        conn.commit()
+        conn.close()
+    
+    def _check_tools(self) -> Dict[str, bool]:
+        """Check which decompilation and analysis tools are available."""
+        tools = {
+            'radare2': False,
+            'retdec': False,
+            'ghidra': False
+        }
+        
+        # Check for radare2
+        if self.use_radare2:
+            try:
+                result = subprocess.run(['r2', '-v'], 
+                                      stdout=subprocess.PIPE, 
+                                      stderr=subprocess.PIPE,
+                                      timeout=2)
+                tools['radare2'] = result.returncode == 0
+            except (subprocess.SubprocessError, FileNotFoundError):
+                tools['radare2'] = False
+        
+        # Check for RetDec (simplified check)
+        if self.use_retdec:
+            try:
+                # Just check if the directory exists as a basic test
+                retdec_path = os.environ.get('RETDEC_PATH')
+                if retdec_path and os.path.exists(retdec_path):
+                    tools['retdec'] = True
+            except:
+                tools['retdec'] = False
+        
+        # Check for Ghidra (simplified check)
+        if self.use_ghidra:
+            try:
+                ghidra_path = os.environ.get('GHIDRA_PATH')
+                if ghidra_path and os.path.exists(ghidra_path):
+                    tools['ghidra'] = True
+            except:
+                tools['ghidra'] = False
+                
+        return tools
+    
+    def process_binary(self, 
+                       binary_path: str, 
+                       output_language: str = 'c',
+                       do_analysis: bool = True,
+                       do_decompilation: bool = True) -> Dict:
+        """
+        Process a binary file through analysis and decompilation.
+        Returns results of the processing.
+        """
+        if not os.path.exists(binary_path):
+            return {
+                'success': False,
+                'error': f"Binary file not found: {binary_path}"
+            }
+            
+        # Generate a hash for the binary
+        binary_hash = self._hash_file(binary_path)
+        
+        # Check if we've already analyzed this file
+        existing_analysis = self._get_existing_analysis(binary_hash)
+        if existing_analysis and not do_analysis:
+            logger.info(f"Using existing analysis for {binary_path} (hash: {binary_hash})")
+            analysis_result = existing_analysis
+        else:
+            # Perform analysis if requested
+            if do_analysis:
+                analysis_result = self._analyze_binary(binary_path, binary_hash)
+            else:
+                analysis_result = {
+                    'binary_hash': binary_hash,
+                    'filename': os.path.basename(binary_path),
+                    'file_size': os.path.getsize(binary_path)
+                }
+        
+        # Check if we've already decompiled to the requested language
+        existing_decompilation = self._get_existing_decompilation(binary_hash, output_language)
+        if existing_decompilation and not do_decompilation:
+            logger.info(f"Using existing decompilation to {output_language} for {binary_path}")
+            decompilation_result = existing_decompilation
+        else:
+            # Perform decompilation if requested
+            if do_decompilation:
+                decompilation_result = self._decompile_binary(binary_path, binary_hash, output_language)
+            else:
+                decompilation_result = {
+                    'binary_hash': binary_hash,
+                    'output_language': output_language,
+                    'decompiled_code': None,
+                    'success': False,
+                    'message': 'Decompilation not requested'
+                }
+        
+        # Combine results
+        return {
+            'success': analysis_result.get('success', False) or decompilation_result.get('success', False),
+            'analysis': analysis_result,
+            'decompilation': decompilation_result,
+            'binary_hash': binary_hash
+        }
+    
+    def _hash_file(self, file_path: str) -> str:
+        """Generate SHA-256 hash of a file."""
+        hash_sha256 = hashlib.sha256()
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(4096), b''):
+                hash_sha256.update(chunk)
+        return hash_sha256.hexdigest()
+    
+    def _get_existing_analysis(self, binary_hash: str) -> Dict:
+        """Retrieve existing analysis for a binary from the database."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "SELECT * FROM binary_analysis WHERE binary_hash = ?", 
+            (binary_hash,)
+        )
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            column_names = [description[0] for description in cursor.description]
+            return dict(zip(column_names, row))
+        
+        return None
+    
+    def _get_existing_decompilation(self, binary_hash: str, output_language: str) -> Dict:
+        """Retrieve existing decompilation for a binary from the database."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "SELECT * FROM decompilation_results WHERE binary_hash = ? AND output_language = ?", 
+            (binary_hash, output_language)
+        )
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            column_names = [description[0] for description in cursor.description]
+            result = dict(zip(column_names, row))
+            result['success'] = True
+            return result
+        
+        return None
+    
+    def _analyze_binary(self, binary_path: str, binary_hash: str) -> Dict:
+        """Analyze a binary file using available tools."""
+        filename = os.path.basename(binary_path)
+        file_size = os.path.getsize(binary_path)
+        
+        analysis_data = {}
+        tool_used = None
+        architecture = "unknown"
+        
+        # Use radare2 if available
+        if self.available_tools.get('radare2', False):
+            try:
+                # Basic info extraction with radare2
+                r2_cmd = f"r2 -c 'iI' -q {binary_path}"
+                result = subprocess.run(r2_cmd, 
+                                     shell=True,
+                                     stdout=subprocess.PIPE, 
+                                     stderr=subprocess.PIPE,
+                                     text=True,
+                                     timeout=30)
+                
+                if result.returncode == 0:
+                    # Parse output to extract architecture and other info
+                    output = result.stdout
+                    analysis_data['r2_info'] = output
+                    
+                    # Extract architecture if possible
+                    for line in output.split('\n'):
+                        if line.startswith('arch'):
+                            architecture = line.split(' ')[1].strip()
+                            break
+                    
+                    tool_used = "radare2"
+                    
+                    # Get function list
+                    r2_funcs_cmd = f"r2 -c 'aaa;afl' -q {binary_path}"
+                    funcs_result = subprocess.run(r2_funcs_cmd, 
+                                               shell=True,
+                                               stdout=subprocess.PIPE, 
+                                               stderr=subprocess.PIPE,
+                                               text=True,
+                                               timeout=60)
+                    
+                    if funcs_result.returncode == 0:
+                        analysis_data['functions'] = funcs_result.stdout
+            
+            except subprocess.SubprocessError as e:
+                logger.error(f"Error analyzing with radare2: {str(e)}")
+                analysis_data['r2_error'] = str(e)
+        
+        # Store analysis results
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT OR REPLACE INTO binary_analysis 
+        (binary_hash, filename, file_size, architecture, analysis_timestamp, tool_used, analysis_data)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            binary_hash,
+            filename,
+            file_size,
+            architecture,
+            time.time(),
+            tool_used,
+            json.dumps(analysis_data)
+        ))
+        
+        conn.commit()
+        conn.close()
+        
+        return {
+            'success': tool_used is not None,
+            'binary_hash': binary_hash,
+            'filename': filename,
+            'file_size': file_size,
+            'architecture': architecture,
+            'tool_used': tool_used,
+            'analysis_data': analysis_data
+        }
+    
+    def _decompile_binary(self, binary_path: str, binary_hash: str, output_language: str) -> Dict:
+        """Decompile a binary file to the specified output language."""
+        supported_languages = ['c', 'python', 'pseudocode']
+        
+        if output_language not in supported_languages:
+            return {
+                'success': False,
+                'error': f"Unsupported output language: {output_language}. Supported: {supported_languages}"
+            }
+        
+        decompiled_code = None
+        tool_used = None
+        quality_score = 0.0
+        
+        # Use RetDec if available and requested language is C
+        if self.available_tools.get('retdec', False) and output_language == 'c':
+            try:
+                # Create a temporary output file
+                output_dir = tempfile.mkdtemp(dir=self.working_dir)
+                output_file = os.path.join(output_dir, 'decompiled.c')
+                
+                # Run RetDec decompiler
+                retdec_path = os.environ.get('RETDEC_PATH', 'retdec-decompiler')
+                cmd = f"{retdec_path} {binary_path} -o {output_file}"
+                
+                result = subprocess.run(cmd, 
+                                     shell=True,
+                                     stdout=subprocess.PIPE, 
+                                     stderr=subprocess.PIPE,
+                                     text=True,
+                                     timeout=300)  # Allow up to 5 minutes
+                
+                if result.returncode == 0 and os.path.exists(output_file):
+                    with open(output_file, 'r') as f:
+                        decompiled_code,
+                tool_used,
+                quality_score,
+                time.time()
+            ))
+            
+            conn.commit()
+            conn.close()
+        
+        return {
+            'success': decompiled_code is not None,
+            'binary_hash': binary_hash,
+            'output_language': output_language,
+            'decompiled_code': decompiled_code,
+            'tool_used': tool_used,
+            'quality_score': quality_score
+        }
+    
+    def _transpile_code(self, source_code: str, from_language: str, to_language: str) -> Optional[str]:
+        """Transpile code from one language to another using AI-based techniques."""
+        if not source_code:
+            return None
+            
+        # For demo purposes, we'll implement a very basic C to Python transpiler
+        if from_language == 'c' and to_language == 'python':
+            # This is a highly simplified implementation - in practice, you'd use a proper parser
+            python_code = []
+            
+            # Basic headers and setup
+            python_code.append("# Auto-generated Python code from C")
+            python_code.append("import ctypes")
+            python_code.append("import sys")
+            python_code.append("")
+            
+            lines = source_code.split('\n')
+            indent_level = 0
+            
+            for line in lines:
+                stripped = line.strip()
+                
+                # Skip C preprocessor directives
+                if stripped.startswith('#'):
+                    continue
+                    
+                # Convert function declarations
+                if 'int main(' in stripped:
+                    python_code.append("def main():")
+                    indent_level = 1
+                    continue
+                    
+                # Convert function returns
+                if stripped.startswith('return '):
+                    python_code.append("    " * indent_level + stripped.replace(';', ''))
+                    continue
+                    
+                # Convert printf
+                if 'printf(' in stripped:
+                    # Extract the string and arguments
+                    print_content = stripped[stripped.find('printf(')+7:stripped.rfind(')')]
+                    if print_content.startswith('"'):
+                        # Extract format string and args
+                        format_end = print_content.rfind('"')
+                        format_str = print_content[1:format_end]
+                        
+                        # Handle format specifiers
+                        format_str = format_str.replace('%d', '{}').replace('%s', '{}').replace('%f', '{}')
+                        
+                        if format_end + 1 < len(print_content) and ',' in print_content[format_end:]:
+                            args = print_content[format_end+2:]
+                            python_code.append("    " * indent_level + f"print('{format_str}'.format({args}))")
+                        else:
+                            python_code.append("    " * indent_level + f"print('{format_str}')")
+                    continue
+                    
+                # Convert basic variable declarations
+                if any(t in stripped for t in ['int ', 'float ', 'double ', 'char ']):
+                    parts = stripped.split()
+                    if len(parts) >= 2 and ';' in parts[-1]:
+                        var_name = parts[1].rstrip(';')
+                        # Remove the type and just assign a value if present
+                        if '=' in stripped:
+                            assign_part = stripped[stripped.find('=')+1:].strip().rstrip(';')
+                            python_code.append("    " * indent_level + f"{var_name} = {assign_part}")
+                        else:
+                            # Default initialization based on type
+                            if 'int' in parts[0]:
+                                python_code.append("    " * indent_level + f"{var_name} = 0")
+                            elif 'float' in parts[0] or 'double' in parts[0]:
+                                python_code.append("    " * indent_level + f"{var_name} = 0.0")
+                            elif 'char' in parts[0]:
+                                python_code.append("    " * indent_level + f"{var_name} = ''")
+                        continue
+                
+                # Convert if statements
+                if stripped.startswith('if '):
+                    condition = stripped[stripped.find('(')+1:stripped.rfind(')')].strip()
+                    python_code.append("    " * indent_level + f"if {condition}:")
+                    indent_level += 1
+                    continue
+                    
+                # Convert else statements
+                if stripped == 'else {':
+                    indent_level -= 1
+                    python_code.append("    " * indent_level + "else:")
+                    indent_level += 1
+                    continue
+                    
+                # Handle closing braces
+                if stripped == '}':
+                    indent_level = max(0, indent_level - 1)
+                    continue
+                    
+                # Add any other line with appropriate indentation, removing semicolons
+                if stripped and not stripped.startswith('//'):
+                    python_code.append("    " * indent_level + stripped.rstrip(';'))
+            
+            # Add main call at the end
+            python_code.append("\nif __name__ == '__main__':")
+            python_code.append("    main()")
+            
+            return '\n'.join(python_code)
+            
+        elif to_language == 'pseudocode':
+            # Convert to a generic pseudocode
+            pseudocode = []
+            
+            # Header
+            pseudocode.append("// Pseudocode representation")
+            pseudocode.append("")
+            
+            lines = source_code.split('\n')
+            indent_level = 0
+            
+            for line in lines:
+                stripped = line.strip()
+                
+                # Skip includes and defines
+                if stripped.startswith('#'):
+                    continue
+                    
+                # Simplify function declarations
+                if 'int main(' in stripped or 'void main(' in stripped:
+                    pseudocode.append("FUNCTION Main()")
+                    indent_level = 1
+                    continue
+                elif 'int ' in stripped and '(' in stripped and '{' in stripped:
+                    func_name = stripped[stripped.find(' ')+1:stripped.find('(')]
+                    params = stripped[stripped.find('(')+1:stripped.find(')')]
+                    pseudocode.append(f"FUNCTION {func_name}({params})")
+                    indent_level = 1
+                    continue
+                    
+                # Convert returns
+                if stripped.startswith('return '):
+                    pseudocode.append("    " * indent_level + "RETURN " + stripped[7:].rstrip(';'))
+                    continue
+                    
+                # Convert printf to OUTPUT
+                if 'printf(' in stripped:
+                    content = stripped[stripped.find('printf(')+7:stripped.rfind(')')].strip()
+                    pseudocode.append("    " * indent_level + f"OUTPUT {content}")
+                    continue
+                    
+                # Convert if statements
+                if stripped.startswith('if '):
+                    condition = stripped[stripped.find('(')+1:stripped.rfind(')')].strip()
+                    pseudocode.append("    " * indent_level + f"IF {condition} THEN")
+                    indent_level += 1
+                    continue
+                    
+                # Convert else
+                if stripped == 'else {':
+                    indent_level -= 1
+                    pseudocode.append("    " * indent_level + "ELSE")
+                    indent_level += 1
+                    continue
+                    
+                # Convert loops
+                if stripped.startswith('for '):
+                    loop_parts = stripped[stripped.find('(')+1:stripped.rfind(')')].split(';')
+                    if len(loop_parts) == 3:
+                        init, cond, incr = loop_parts
+                        pseudocode.append("    " * indent_level + f"FOR {init.strip()} TO {cond.strip()} STEP {incr.strip()}")
+                        indent_level += 1
+                    continue
+                    
+                if stripped.startswith('while '):
+                    condition = stripped[stripped.find('(')+1:stripped.rfind(')')].strip()
+                    pseudocode.append("    " * indent_level + f"WHILE {condition} DO")
+                    indent_level += 1
+                    continue
+                    
+                # Handle closing braces
+                if stripped == '}':
+                    indent_level = max(0, indent_level - 1)
+                    if indent_level == 0:
+                        pseudocode.append("END FUNCTION")
+                    else:
+                        pseudocode.append("    " * indent_level + "END")
+                    continue
+                    
+                # Add any other line with appropriate indentation, removing semicolons
+                if stripped and not stripped.startswith('//'):
+                    pseudocode.append("    " * indent_level + stripped.rstrip(';'))
+            
+            return '\n'.join(pseudocode)
+            
+        return None
+    
+    def detect_patterns(self, binary_hash: str) -> Dict:
+        """
+        Detect common patterns and algorithms in the decompiled code.
+        Returns detected patterns and their confidence scores.
+        """
+        # Get decompiled C code
+        decompiled = self._get_existing_decompilation(binary_hash, 'c')
+        if not decompiled or not decompiled.get('decompiled_code'):
+            return {
+                'success': False,
+                'error': 'No decompiled code available for pattern detection'
+            }
+        
+        code = decompiled.get('decompiled_code')
+        patterns = []
+        
+        # Simple pattern detection based on keywords and structure
+        pattern_signatures = {
+            'encryption': [
+                'AES', 'DES', 'RC4', 'encrypt', 'decrypt', 'cipher',
+                'XOR', 'shift_left', 'shift_right', 'rotl', 'rotr'
+            ],
+            'network': [
+                'socket', 'connect', 'bind', 'listen', 'accept', 'recv',
+                'send', 'htons', 'inet_addr', 'getaddrinfo'
+            ],
+            'file_operations': [
+                'fopen', 'fread', 'fwrite', 'fclose', 'open', 'read',
+                'write', 'close', 'FILE'
+            ],
+            'string_manipulation': [
+                'strcpy', 'strncpy', 'strcat', 'strncat', 'strcmp',
+                'strncmp', 'strlen', 'memcpy', 'memset'
+            ],
+            'sorting_algorithms': [
+                'bubble sort', 'quick sort', 'merge sort', 'heap sort',
+                'insertion sort', 'selection sort'
+            ],
+            'data_structures': [
+                'linked list', 'stack', 'queue', 'tree', 'graph',
+                'hash table', 'hash map'
+            ]
+        }
+        
+        # Check for patterns
+        for pattern_type, signatures in pattern_signatures.items():
+            matches = 0
+            for sig in signatures:
+                if sig.lower() in code.lower():
+                    matches += 1
+            
+            if matches > 0:
+                confidence = min(0.95, matches / len(signatures) * 2)
+                
+                pattern_id = f"pattern_{pattern_type}_{binary_hash}_{int(time.time())}"
+                pattern = {
+                    'pattern_id': pattern_id,
+                    'type': pattern_type,
+                    'matches': matches,
+                    'confidence': confidence,
+                    'description': f"Detected {pattern_type} pattern with {matches} signature matches"
+                }
+                patterns.append(pattern)
+                
+                # Store pattern in database
+                self._store_pattern(pattern_id, pattern_type, binary_hash, pattern)
+        
+        return {
+            'success': True,
+            'patterns': patterns,
+            'pattern_count': len(patterns),
+            'binary_hash': binary_hash
+        }
+    
+    def _store_pattern(self, pattern_id: str, pattern_type: str, binary_hash: str, pattern_data: Dict) -> None:
+        """Store detected pattern in the database."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT OR REPLACE INTO code_patterns
+        (pattern_id, pattern_type, binary_hash, pattern_data, detection_timestamp)
+        VALUES (?, ?, ?, ?, ?)
+        ''', (
+            pattern_id,
+            pattern_type,
+            binary_hash,
+            json.dumps(pattern_data),
+            time.time()
+        ))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_patterns_for_binary(self, binary_hash: str) -> List[Dict]:
+        """Retrieve all patterns detected for a specific binary."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "SELECT pattern_data FROM code_patterns WHERE binary_hash = ?",
+            (binary_hash,)
+        )
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        patterns = []
+        for row in rows:
+            pattern_data = json.loads(row[0])
+            patterns.append(pattern_data)
+            
+        return patterns
+    
+    def reconstruct_software(self, 
+                           binary_hash: str, 
+                           target_language: str = 'python',
+                           enhance: bool = True) -> Dict:
+        """
+        Reconstruct and potentially enhance software from binary analysis.
+        Returns the reconstructed code and enhancement details.
+        """
+        # First get decompiled code
+        decompiled = self._get_existing_decompilation(binary_hash, target_language)
+        if not decompiled or not decompiled.get('decompiled_code'):
+            # Try to decompile now
+            decompiled_c = self._get_existing_decompilation(binary_hash, 'c')
+            if decompiled_c and decompiled_c.get('decompiled_code'):
+                # Transpile from C to target language
+                transpiled = self._transpile_code(
+                    decompiled_c.get('decompiled_code'),
+                    'c',
+                    target_language
+                )
+                if transpiled:
+                    decompiled = {
+                        'decompiled_code': transpiled,
+                        'success': True
+                    }
+            
+            if not decompiled or not decompiled.get('decompiled_code'):
+                return {
+                    'success': False,
+                    'error': f'Unable to obtain code in {target_language} for reconstruction'
+                }
+        
+        code = decompiled.get('decompiled_code')
+        
+        # Get patterns to understand what the code does
+        patterns = self.get_patterns_for_binary(binary_hash)
+        
+        enhancements = []
+        enhanced_code = code
+        
+        if enhance:
+            # Apply enhancements based on detected patterns
+            for pattern in patterns:
+                pattern_type = pattern.get('type')
+                
+                # Enhancement for file operations: add error handling
+                if pattern_type == 'file_operations' and target_language == 'python':
+                    if 'open(' in code and 'try:' not in code:
+                        # Add basic try-except for file operations
+                        enhanced_code = self._enhance_file_operations(enhanced_code)
+                        enhancements.append({
+                            'type': 'error_handling',
+                            'description': 'Added try-except blocks for file operations'
+                        })
+                
+                # Enhancement for string manipulation: add bounds checking
+                elif pattern_type == 'string_manipulation' and target_language == 'python':
+                    if any(func in code for func in ['strcpy', 'strcat', 'memcpy']):
+                        enhanced_code = self._enhance_string_safety(enhanced_code)
+                        enhancements.append({
+                            'type': 'security',
+                            'description': 'Improved string handling safety'
+                        })
+                
+                # Enhancement for sorting: optimize algorithms
+                elif pattern_type == 'sorting_algorithms' and target_language == 'python':
+                    if 'bubble sort' in code.lower() or 'selection sort' in code.lower():
+                        enhanced_code = self._optimize_sorting(enhanced_code)
+                        enhancements.append({
+                            'type': 'performance',
+                            'description': 'Optimized sorting algorithms'
+                        })
+                        
+                # Add more enhancements for other patterns
+        
+        return {
+            'success': True,
+            'original_code': code,
+            'enhanced_code': enhanced_code,
+            'enhancements': enhancements,
+            'binary_hash': binary_hash,
+            'target_language': target_language
+        }
+    
+    def _enhance_file_operations(self, code: str) -> str:
+        """Add error handling to file operations."""
+        lines = code.split('\n')
+        enhanced = []
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i]
+            
+            # Check for file opening without try-except
+            if ('open(' in line or 'fopen(' in line) and 'try:' not in line:
+                # Add try block
+                indentation = len(line) - len(line.lstrip())
+                indent = ' ' * indentation
+                
+                enhanced.append(f"{indent}try:")
+                enhanced.append(f"{indent}    {line.lstrip()}")
+                
+                # Find the scope of the file operation
+                j = i + 1
+                while j < len(lines) and (len(lines[j]) - len(lines[j].lstrip())) > indentation:
+                    enhanced.append(f"{indent}    {lines[j].lstrip()}")
+                    j += 1
+                
+                # Add except block
+                enhanced.append(f"{indent}except Exception as e:")
+                enhanced.append(f"{indent}    print(f\"Error during file operation: {{e}}\")")
+                enhanced.append(f"{indent}    # Handle error appropriately")
+                
+                i = j
+            else:
+                enhanced.append(line)
+                i += 1
+        
+        return '\n'.join(enhanced)
+    
+    def _enhance_string_safety(self, code: str) -> str:
+        """Enhance string manipulation safety."""
+        if 'python' in code.lower():
+            # For Python, replace unsafe string functions
+            replacements = {
+                'strcpy': 'safe_copy',
+                'strcat': 'safe_concatenate',
+                'memcpy': 'safe_memory_copy'
+            }
+            
+            for old, new in replacements.items():
+                code = code.replace(old, new)
+            
+            # Add safety function definitions if not already present
+            if 'def safe_copy' not in code:
+                safety_functions = """
+# Enhanced safety functions
+def safe_copy(dest, src):
+    \"\"\"Safe string copy with bounds checking\"\"\"
+    if isinstance(src, str) and isinstance(dest, list):
+        for i in range(min(len(src), len(dest)-1)):
+            dest[i] = src[i]
+        dest[min(len(src), len(dest)-1)] = '\\0'
+    return dest
+
+def safe_concatenate(dest, src):
+    \"\"\"Safe string concatenation with bounds checking\"\"\"
+    if isinstance(src, str) and isinstance(dest, list):
+        dest_len = dest.index('\\0') if '\\0' in dest else 0
+        for i in range(min(len(src), len(dest)-dest_len-1)):
+            dest[dest_len+i] = src[i]
+        dest[min(dest_len+len(src), len(dest)-1)] = '\\0'
+    return dest
+
+def safe_memory_copy(dest, src, size):
+    \"\"\"Safe memory copy with bounds checking\"\"\"
+    if hasattr(src, '__len__') and hasattr(dest, '__len__'):
+        for i in range(min(size, len(dest), len(src))):
+            dest[i] = src[i]
+    return dest
+"""
+                # Find a good place to insert the safety functions
+                import_end = code.rfind('import ')
+                if import_end >= 0:
+                    # Find the end of the imports section
+                    import_end = code.find('\n', import_end)
+                    if import_end >= 0:
+                        code = code[:import_end+1] + safety_functions + code[import_end+1:]
+                else:
+                    # Just add at the beginning
+                    code = safety_functions + code
+        
+        return code
+    
+    def _optimize_sorting(self, code: str) -> str:
+        """Optimize sorting algorithms."""
+        if 'python' in code.lower():
+            # Replace inefficient sorts with Python's built-in sort
+            if 'def bubble_sort' in code or 'def selection_sort' in code:
+                # Find the sorting function
+                for sort_name in ['bubble_sort', 'selection_sort']:
+                    start_idx = code.find(f'def {sort_name}')
+                    if start_idx >= 0:
+                        # Find the end of the function
+                        depth = 0
+                        end_idx = start_idx
+                        in_function = False
+                        
+                        for i in range(start_idx, len(code)):
+                            if code[i] == ':':
+                                in_function = True
+                            elif in_function and code[i:i+4] == '    ' and code[i+4] != ' ':
+                                depth = 1
+                            elif in_function and depth == 1 and (i == len(code)-1 or code[i:i+4] != '    '):
+                                end_idx = i
+                                break
+                        
+                        if end_idx > start_idx:
+                            # Replace with optimized version
+                            optimized_func = f"""def {sort_name}(arr):
+    \"\"\"Optimized sorting function\"\"\"
+    # Original function replaced with more efficient implementation
+    return sorted(arr)
+"""
+                            code = code[:start_idx] + optimized_func + code[end_idx:]
+        
+        return code
+
+
+class DrugDiscovery:
+    """
+    Handles molecular modeling, drug discovery, and biomimicry.
+    Integrates with tools like RDKit, OpenBabel, and external databases.
+    """
+    
+    def __init__(self, 
+                 working_dir: str = './drug_discovery',
+                 use_remote_databases: bool = True):
+        """Initialize drug discovery module."""
+        self.working_dir = working_dir
+        self.use_remote_databases = use_remote_databases
+        
+        # Create working directory if it doesn't exist
+        os.makedirs(working_dir, exist_ok=True)
+        
+        # Initialize database for storing molecular data
+        self.db_path = os.path.join(working_dir, 'molecules.db')
+        self._init_database()
+        
+        # Cache for molecular properties
+        self.property_cache = {}
+        
+        logger.info(f"Drug Discovery module initialized")
+    
+    def _init_database(self) -> None:
+        """Initialize SQLite database for storing molecular data."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Create tables if not exist
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS molecules (
+            molecule_id TEXT PRIMARY KEY,
+            smiles TEXT,
+            inchi TEXT,
+            mol_formula TEXT,
+            mol_weight REAL,
+            created_timestamp REAL,
+            source TEXT,
+            properties TEXT
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS interactions (
+            interaction_id TEXT PRIMARY KEY,
+            molecule1_id TEXT,
+            molecule2_id TEXT,
+            interaction_type TEXT,
+            affinity REAL,
+            detected_timestamp REAL,
+            properties TEXT
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS docking_results (
+            docking_id TEXT PRIMARY KEY,
+            molecule_id TEXT,
+            target_id TEXT,
+            score REAL,
+            binding_mode TEXT,
+            docking_timestamp REAL,
+            details TEXT
+        )
+        ''')
+        
+        conn.commit()
+        conn.close()
+    
+    def process_molecule(self, 
+                       molecule_input: str, 
+                       input_format: str = 'smiles') -> Dict:
+        """
+        Process a molecule from various input formats (SMILES, InChI, etc.).
+        Returns molecular properties and analysis.
+        """
         try:
-            module = importlib.import_module(path)
-            extension = module.initialize(self.core)
-            self.extensions[name] = extension 
-            self.extension_states[name] = "active"
-            return True
+            # Create RDKit molecule object
+            mol = None
+            
+            if input_format.lower() == 'smiles':
+                mol = Chem.MolFromSmiles(molecule_input)
+            elif input_format.lower() == 'inchi':
+                mol = Chem.MolFromInchi(molecule_input)
+            else:
+                return {
+                    'success': False,
+                    'error': f"Unsupported input format: {input_format}"
+                }
+            
+            if mol is None:
+                return {
+                    'success': False,
+                    'error': f"Failed to parse molecule from {input_format}"
+                }
+            
+            # Calculate basic properties
+            smiles = Chem.MolToSmiles(mol)
+            inchi = Chem.MolToInchi(mol)
+            mol_formula = Chem.rdMolDescriptors.CalcMolFormula(mol)
+            mol_weight = Descriptors.MolWt(mol)
+            
+            # Generate unique ID for the molecule
+            molecule_id = hashlib.md5(smiles.encode()).hexdigest()
+            
+            # Calculate more properties
+            properties = self._calculate_properties(mol)
+            
+            # Store in database
+            self._store_molecule(molecule_id, smiles, inchi, mol_formula, mol_weight, properties)
+            
+            return {
+                'success': True,
+                'molecule_id': molecule_id,
+                'smiles': smiles,
+                'inchi': inchi,
+                'formula': mol_formula,
+                'molecular_weight': mol_weight,
+                'properties': properties,
+                'druglikeness': self._assess_druglikeness(properties)
+            }
+            
         except Exception as e:
-            logger.error(f"Failed to load extension {name}: {e}")
-            return False
+            logger.error(f"Error processing molecule: {str(e)}")
+            return {
+                'success': False,
+                'error': f"Error processing molecule: {str(e)}"
+            }
+    
+    def _calculate_properties(self, mol) -> Dict:
+        """Calculate molecular properties using RDKit."""
+        properties = {}
+        
+        # Physical properties
+        properties['logP'] = Descriptors.MolLogP(mol)
+        properties['TPSA'] = Descriptors.TPSA(mol)
+        properties['HBD'] = Descriptors.NumHDonors(mol)
+        properties['HBA'] = Descriptors.NumHAcceptors(mol)
+        properties['RotB'] = Descriptors.NumRotatableBonds(mol)
+        properties['MolWt'] = Descriptors.MolWt(mol)
+        properties['HeavyAtoms'] = mol.GetNumHeavyAtoms()
+        properties['Rings'] = Chem.rdMolDescriptors.CalcNumRings(mol)
+        properties['AromaticRings'] = Chem.rdMolDescriptors.CalcNumAromaticRings(mol)
+        
+        # Topological properties
+        properties['BertzCT'] = Chem.rdMolDescriptors.CalcBertzCT(mol)
+        properties['FractionCSP3'] = Chem.rdMolDescriptors.CalcFractionCSP3(mol)
+        
+        # Store in cache
+        smiles = Chem.MolToSmiles(mol)
+        self.property_cache[smiles] = properties
+        
+        return properties
+    
+    def _assess_druglikeness(self, properties: Dict) -> Dict:
+        """Assess druglikeness based on various rule sets."""
+        results = {}
+        
+        # Lipinski's Rule of 5
+        lipinski_violations = 0
+        if properties['MolWt'] > DRUGLIKENESS_FILTERS['lipinski']['MW_max']:
+            lipinski_violations += 1
+        if properties['logP'] > DRUGLIKENESS_FILTERS['lipinski']['LogP_max']:
+            lipinski_violations += 1
+        if properties['HBD'] > DRUGLIKENESS_FILTERS['lipinski']['HBD_max']:
+            lipinski_violations += 1
+        if properties['HBA'] > DRUGLIKENESS_FILTERS['lipinski']['HBA_max']:
+            lipinski_violations += 1
+            
+        results['lipinski'] = {
+            'violations': lipinski_violations,
+            'pass': lipinski_violations <= 1  # Allow one violation
+        }
+        
+        # Veber rules
+        veber_pass = (
+            properties['RotB'] <= DRUGLIKENESS_FILTERS['veber']['RotB_max'] and
+            properties['TPSA'] <= DRUGLIKENESS_FILTERS['veber']['PSA_max']
+        )
+        results['veber'] = {
+            'pass': veber_pass
+        }
+        
+        # Ghose filter
+        ghose_violations = 0
+        if properties['MolWt'] < DRUGLIKENESS_FILTERS['ghose']['MW_min'] or properties['MolWt'] > DRUGLIKENESS_FILTERS['ghose']['MW_max']:
+            ghose_violations += 1
+        if properties['logP'] < DRUGLIKENESS_FILTERS['ghose']['LogP_min'] or properties['logP'] > DRUGLIKENESS_FILTERS['ghose']['LogP_max']:
+            ghose_violations += 1
+        if properties['HeavyAtoms'] < DRUGLIKENESS_FILTERS['ghose']['AtomsCount_min'] or properties['HeavyAtoms'] > DRUGLIKENESS_FILTERS['ghose']['AtomsCount_max']:
+            ghose_violations += 1
+            
+        results['ghose'] = {
+            'violations': ghose_violations,
+            'pass': ghose_violations <= 1
+        }
+        
+        # Overall druglikeness score (simple average of pass rates)
+        overall_score = (
+            (1 if results['lipinski']['pass'] else 0) +
+            (1 if results['veber']['pass'] else 0) +
+            (1 if results['ghose']['pass'] else 0)
+        ) / 3.0
+        
+        results['overall_score'] = overall_score
+        results['overall_pass'] = overall_score >= 0.5
+        
+        return results
+    
+    def _store_molecule(self, 
+                       molecule_id: str, 
+                       smiles: str, 
+                       inchi: str, 
+                       mol_formula: str, 
+                       mol_weight: float, 
+                       properties: Dict) -> None:
+        """Store molecule information in the database."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT OR REPLACE INTO molecules
+        (molecule_id, smiles, inchi, mol_formula, mol_weight, created_timestamp, source, properties)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            molecule_id,
+            smiles,
+            inchi,
+            mol_formula,
+            mol_weight,
+            time.time(),
+            'user_input',
+            json.dumps(properties)
+        ))
+        
+        conn.commit()
+        conn.close()
+    
+    def generate_molecular_variants(self, 
+                                  molecule_id: str, 
+                                  num_variants: int = 5,
+                                  mutation_type: str = 'functional_groups') -> Dict:
+        """
+        Generate structural variants of a molecule through various mutations.
+        Returns list of variant molecules and their properties.
+        """
+        # Get original molecule
+         = f.read()
+                    
+                    # Estimate quality based on code size and structure
+                    quality_score = min(1.0, len(decompiled_code) / 10000)
+                    tool_used = "retdec"
+            
+            except Exception as e:
+                logger.error(f"Error decompiling with RetDec: {str(e)}")
+                return {
+                    'success': False,
+                    'error': f"RetDec decompilation error: {str(e)}"
+                }
+        
+        # For languages other than C, we need to first decompile to C, then transpile
+        elif output_language in ['python', 'pseudocode']:
+            # First decompile to C
+            c_result = self._decompile_binary(binary_path, binary_hash, 'c')
+            
+            if c_result.get('success'):
+                # Then transpile from C to the target language
+                c_code = c_result.get('decompiled_code')
+                transpiled_code = self._transpile_code(c_code, 'c', output_language)
+                
+                if transpiled_code:
+                    decompiled_code = transpiled_code
+                    quality_score = c_result.get('quality_score', 0.0) * 0.8  # Slight penalty for transpilation
+                    tool_used = f"{c_result.get('tool_used')}_transpiled"
+        
+        # Store decompilation results
+        if decompiled_code:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+            INSERT OR REPLACE INTO decompilation_results 
+            (binary_hash, output_language, decompiled_code, tool_used, quality_score, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                binary_hash,
+                output_language,
+                decompiled_code

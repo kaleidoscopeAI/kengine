@@ -12,9 +12,6 @@ import sys
 import logging
 from typing import Dict, List, Any, Optional, Union, BinaryIO
 import argparse
-from kaleidoscope-core import KaleidoscopeCore
-from kaleidoscope-integration import ModuleIntegration
-import asyncio
 
 # Configure logging
 logging.basicConfig(
